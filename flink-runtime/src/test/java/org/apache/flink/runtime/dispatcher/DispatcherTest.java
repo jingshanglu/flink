@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.dispatcher;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.operators.ResourceSpec;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.BlobServerOptions;
@@ -28,7 +29,7 @@ import org.apache.flink.runtime.blob.BlobServer;
 import org.apache.flink.runtime.blob.VoidBlobStore;
 import org.apache.flink.runtime.checkpoint.Checkpoints;
 import org.apache.flink.runtime.checkpoint.StandaloneCheckpointRecoveryFactory;
-import org.apache.flink.runtime.checkpoint.savepoint.SavepointV2;
+import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
 import org.apache.flink.runtime.client.JobSubmissionException;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ErrorInfo;
@@ -36,7 +37,6 @@ import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServices;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobmanager.JobGraphWriter;
 import org.apache.flink.runtime.jobmaster.JobManagerRunner;
@@ -64,6 +64,7 @@ import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.testtasks.NoOpInvokable;
 import org.apache.flink.runtime.testutils.TestingJobGraphStore;
 import org.apache.flink.runtime.util.TestingFatalErrorHandler;
+import org.apache.flink.runtime.util.TestingFatalErrorHandlerResource;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TestLogger;
@@ -124,11 +125,12 @@ public class DispatcherTest extends TestLogger {
 	public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
 	@Rule
+	public final TestingFatalErrorHandlerResource testingFatalErrorHandlerResource = new TestingFatalErrorHandlerResource();
+
+	@Rule
 	public TestName name = new TestName();
 
 	private JobGraph jobGraph;
-
-	private TestingFatalErrorHandler fatalErrorHandler;
 
 	private TestingLeaderElectionService jobMasterLeaderElectionService;
 
@@ -164,9 +166,7 @@ public class DispatcherTest extends TestLogger {
 		final JobVertex testVertex = new JobVertex("testVertex");
 		testVertex.setInvokableClass(NoOpInvokable.class);
 		jobGraph = new JobGraph(TEST_JOB_ID, "testJob", testVertex);
-		jobGraph.setAllowQueuedScheduling(true);
 
-		fatalErrorHandler = new TestingFatalErrorHandler();
 		heartbeatServices = new HeartbeatServices(1000L, 10000L);
 
 		jobMasterLeaderElectionService = new TestingLeaderElectionService();
@@ -203,7 +203,7 @@ public class DispatcherTest extends TestLogger {
 
 	private class TestingDispatcherBuilder {
 
-		private Collection<JobGraph> initialJobGraphs = Collections.emptyList();
+		private DispatcherBootstrap dispatcherBootstrap = new DefaultDispatcherBootstrap(Collections.emptyList());
 
 		private HeartbeatServices heartbeatServices = DispatcherTest.this.heartbeatServices;
 
@@ -223,8 +223,8 @@ public class DispatcherTest extends TestLogger {
 			return this;
 		}
 
-		TestingDispatcherBuilder setInitialJobGraphs(Collection<JobGraph> initialJobGraphs) {
-			this.initialJobGraphs = initialJobGraphs;
+		TestingDispatcherBuilder setDispatcherBootstrap(DispatcherBootstrap dispatcherBootstrap) {
+			this.dispatcherBootstrap = dispatcherBootstrap;
 			return this;
 		}
 
@@ -245,9 +245,8 @@ public class DispatcherTest extends TestLogger {
 
 			return new TestingDispatcher(
 				rpcService,
-				Dispatcher.DISPATCHER_NAME + '_' + name.getMethodName(),
 				DispatcherId.generate(),
-				initialJobGraphs,
+				dispatcherBootstrap,
 				new DispatcherServices(
 					configuration,
 					haServices,
@@ -255,7 +254,7 @@ public class DispatcherTest extends TestLogger {
 					blobServer,
 					heartbeatServices,
 					archivedExecutionGraphStore,
-					fatalErrorHandler,
+					testingFatalErrorHandlerResource.getFatalErrorHandler(),
 					VoidHistoryServerArchivist.INSTANCE,
 					null,
 					UnregisteredMetricGroups.createUnregisteredJobManagerMetricGroup(),
@@ -266,12 +265,8 @@ public class DispatcherTest extends TestLogger {
 
 	@After
 	public void tearDown() throws Exception {
-		try {
-			fatalErrorHandler.rethrowError();
-		} finally {
-			if (dispatcher != null) {
-				RpcUtils.terminateRpcEndpoint(dispatcher, TIMEOUT);
-			}
+		if (dispatcher != null) {
+			RpcUtils.terminateRpcEndpoint(dispatcher, TIMEOUT);
 		}
 
 		if (haServices != null) {
@@ -312,7 +307,7 @@ public class DispatcherTest extends TestLogger {
 
 		DispatcherGateway dispatcherGateway = dispatcher.getSelfGateway(DispatcherGateway.class);
 
-		ResourceSpec resourceSpec = ResourceSpec.newBuilder().setCpuCores(2).build();
+		ResourceSpec resourceSpec = ResourceSpec.newBuilder(2.0, 0).build();
 
 		final JobVertex firstVertex = new JobVertex("firstVertex");
 		firstVertex.setInvokableClass(NoOpInvokable.class);
@@ -322,7 +317,6 @@ public class DispatcherTest extends TestLogger {
 		secondVertex.setInvokableClass(NoOpInvokable.class);
 
 		JobGraph jobGraphWithTwoVertices = new JobGraph(TEST_JOB_ID, "twoVerticesJob", firstVertex, secondVertex);
-		jobGraphWithTwoVertices.setAllowQueuedScheduling(true);
 
 		CompletableFuture<Acknowledge> acknowledgeFuture = dispatcherGateway.submitJob(jobGraphWithTwoVertices, TIMEOUT);
 
@@ -405,7 +399,7 @@ public class DispatcherTest extends TestLogger {
 		final CheckpointStorageLocation checkpointStorageLocation = checkpointStorage.initializeLocationForSavepoint(checkpointId, savepointFile.getAbsolutePath());
 
 		final CheckpointMetadataOutputStream metadataOutputStream = checkpointStorageLocation.createMetadataOutputStream();
-		Checkpoints.storeCheckpointMetadata(new SavepointV2(checkpointId, Collections.emptyList(), Collections.emptyList()), metadataOutputStream);
+		Checkpoints.storeCheckpointMetadata(new CheckpointMetadata(checkpointId, Collections.emptyList(), Collections.emptyList()), metadataOutputStream);
 
 		final CompletedCheckpointStorageLocation completedCheckpointStorageLocation = metadataOutputStream.closeAndFinalizeCheckpoint();
 
@@ -442,7 +436,7 @@ public class DispatcherTest extends TestLogger {
 	}
 
 	/**
-	 * Tests that the {@link Dispatcher} fails fatally if the recoverd jobs cannot be started.
+	 * Tests that the {@link Dispatcher} fails fatally if the recovered jobs cannot be started.
 	 * See FLINK-9097.
 	 */
 	@Test
@@ -452,10 +446,12 @@ public class DispatcherTest extends TestLogger {
 		final JobGraph failingJobGraph = createFailingJobGraph(testException);
 
 		dispatcher = new TestingDispatcherBuilder()
-			.setInitialJobGraphs(Collections.singleton(failingJobGraph))
+			.setDispatcherBootstrap(new DefaultDispatcherBootstrap(Collections.singleton(failingJobGraph)))
 			.build();
 
 		dispatcher.start();
+
+		final TestingFatalErrorHandler fatalErrorHandler = testingFatalErrorHandlerResource.getFatalErrorHandler();
 
 		final Throwable error = fatalErrorHandler.getErrorFuture().get(TIMEOUT.toMilliseconds(), TimeUnit.MILLISECONDS);
 
@@ -602,7 +598,7 @@ public class DispatcherTest extends TestLogger {
 			.build();
 
 		dispatcher = new TestingDispatcherBuilder()
-			.setInitialJobGraphs(Collections.singleton(jobGraph))
+			.setDispatcherBootstrap(new DefaultDispatcherBootstrap(Collections.singleton(jobGraph)))
 			.setJobGraphWriter(testingJobGraphStore)
 			.build();
 		dispatcher.start();

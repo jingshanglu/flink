@@ -44,14 +44,12 @@ import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
-import org.apache.flink.testutils.junit.category.AlsoRunWithSchedulerNG;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,7 +63,6 @@ import java.util.concurrent.TimeUnit;
 /**
  * Tests the availability of accumulator results during runtime.
  */
-@Category(AlsoRunWithSchedulerNG.class)
 public class AccumulatorLiveITCase extends TestLogger {
 
 	private static final Logger LOG = LoggerFactory.getLogger(AccumulatorLiveITCase.class);
@@ -160,7 +157,7 @@ public class AccumulatorLiveITCase extends TestLogger {
 			FutureUtils.retrySuccessfulWithDelay(
 				() -> {
 					try {
-						return CompletableFuture.completedFuture(client.getAccumulators(jobGraph.getJobID()));
+						return CompletableFuture.completedFuture(client.getAccumulators(jobGraph.getJobID()).get());
 					} catch (Exception e) {
 						return FutureUtils.completedExceptionally(e);
 					}
@@ -169,7 +166,7 @@ public class AccumulatorLiveITCase extends TestLogger {
 				deadline,
 				accumulators -> accumulators.size() == 1
 					&& accumulators.containsKey(ACCUMULATOR_NAME)
-					&& (int) accumulators.get(ACCUMULATOR_NAME).getUnchecked() == NUM_ITERATIONS,
+					&& (int) accumulators.get(ACCUMULATOR_NAME) == NUM_ITERATIONS,
 				TestingUtils.defaultScheduledExecutor()
 			).get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 

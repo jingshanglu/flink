@@ -18,31 +18,30 @@
 
 package org.apache.flink.runtime.scheduler.adapter;
 
-import org.apache.flink.runtime.executiongraph.failover.flip1.FailoverResultPartition;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
+import org.apache.flink.runtime.scheduler.strategy.ResultPartitionState;
 import org.apache.flink.runtime.scheduler.strategy.SchedulingResultPartition;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
-import static org.apache.flink.runtime.scheduler.strategy.SchedulingResultPartition.ResultPartitionState.DONE;
-import static org.apache.flink.runtime.scheduler.strategy.SchedulingResultPartition.ResultPartitionState.EMPTY;
-import static org.apache.flink.runtime.scheduler.strategy.SchedulingResultPartition.ResultPartitionState.PRODUCING;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
- * Default implementation of {@link SchedulingResultPartition} and {@link FailoverResultPartition}.
+ * Default implementation of {@link SchedulingResultPartition}.
  */
-class DefaultResultPartition implements SchedulingResultPartition<DefaultExecutionVertex, DefaultResultPartition>,
-		FailoverResultPartition<DefaultExecutionVertex, DefaultResultPartition> {
+class DefaultResultPartition implements SchedulingResultPartition {
 
 	private final IntermediateResultPartitionID resultPartitionId;
 
 	private final IntermediateDataSetID intermediateDataSetId;
 
 	private final ResultPartitionType partitionType;
+
+	private final Supplier<ResultPartitionState> resultPartitionStateSupplier;
 
 	private DefaultExecutionVertex producer;
 
@@ -51,10 +50,12 @@ class DefaultResultPartition implements SchedulingResultPartition<DefaultExecuti
 	DefaultResultPartition(
 			IntermediateResultPartitionID partitionId,
 			IntermediateDataSetID intermediateDataSetId,
-			ResultPartitionType partitionType) {
+			ResultPartitionType partitionType,
+			Supplier<ResultPartitionState> resultPartitionStateSupplier) {
 		this.resultPartitionId = checkNotNull(partitionId);
 		this.intermediateDataSetId = checkNotNull(intermediateDataSetId);
 		this.partitionType = checkNotNull(partitionType);
+		this.resultPartitionStateSupplier = checkNotNull(resultPartitionStateSupplier);
 		this.consumers = new ArrayList<>();
 	}
 
@@ -75,14 +76,7 @@ class DefaultResultPartition implements SchedulingResultPartition<DefaultExecuti
 
 	@Override
 	public ResultPartitionState getState() {
-		switch (producer.getState()) {
-			case RUNNING:
-				return PRODUCING;
-			case FINISHED:
-				return DONE;
-			default:
-				return EMPTY;
-		}
+		return resultPartitionStateSupplier.get();
 	}
 
 	@Override

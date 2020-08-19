@@ -20,49 +20,25 @@ package org.apache.flink.table.planner.runtime.utils;
 
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.table.functions.AggregateFunction;
+import org.apache.flink.table.annotation.DataTypeHint;
+import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.functions.python.PythonEnv;
 import org.apache.flink.table.functions.python.PythonFunction;
+import org.apache.flink.table.functions.python.PythonFunctionKind;
 
+import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Random;
+import java.util.TimeZone;
+
+import static org.junit.Assert.fail;
 
 /**
  * Test scalar functions.
  */
 public class JavaUserDefinedScalarFunctions {
-
-	/**
-	 * Accumulator for test requiresOver.
-	 */
-	public static class AccumulatorOver extends Tuple2<Long, Integer> {}
-
-	/**
-	 * Test for requiresOver.
-	 */
-	public static class OverAgg0 extends AggregateFunction<Long, AccumulatorOver> {
-		@Override
-		public AccumulatorOver createAccumulator() {
-			return new AccumulatorOver();
-		}
-
-		@Override
-		public Long getValue(AccumulatorOver accumulator) {
-			return 1L;
-		}
-
-		//Overloaded accumulate method
-		public void accumulate(AccumulatorOver accumulator, long iValue, int iWeight) {
-		}
-
-		@Override
-		public boolean requiresOver() {
-			return true;
-		}
-	}
 
 	/**
 	 * Increment input.
@@ -77,8 +53,9 @@ public class JavaUserDefinedScalarFunctions {
 	 * Concatenate inputs as strings.
 	 */
 	public static class JavaFunc1 extends ScalarFunction {
-		public String eval(Integer a, int b,  Long c) {
-			return a + " and " + b + " and " + c;
+		public String eval(Integer a, int b,  TimestampData c) {
+			Long ts = (c == null) ? null : c.getMillisecond();
+			return a + " and " + b + " and " + ts;
 		}
 	}
 
@@ -114,6 +91,42 @@ public class JavaUserDefinedScalarFunctions {
 	public static class JavaFunc4 extends ScalarFunction {
 		public String eval(Integer[] a, String[] b) {
 			return Arrays.toString(a) + " and " + Arrays.toString(b);
+		}
+	}
+
+	/**
+	 * A UDF minus Timestamp with the specified offset.
+	 * This UDF also ensures open and close are called.
+	 */
+	public static class JavaFunc5 extends ScalarFunction {
+		// these fields must be reset to false at the beginning of tests,
+		// otherwise the static fields will be changed by several tests concurrently
+		public static boolean openCalled = false;
+		public static boolean closeCalled = false;
+
+		@Override
+		public void open(FunctionContext context) {
+			openCalled = true;
+		}
+
+		public @DataTypeHint("TIMESTAMP(3)") Timestamp eval(
+				@DataTypeHint("TIMESTAMP(3)") TimestampData timestampData,
+				Integer offset) {
+			if (!openCalled) {
+				fail("Open was not called before run.");
+			}
+			if (timestampData == null || offset == null) {
+				return null;
+			} else {
+				long ts = timestampData.getMillisecond() - offset;
+				int tzOffset = TimeZone.getDefault().getOffset(ts);
+				return new Timestamp(ts - tzOffset);
+			}
+		}
+
+		@Override
+		public void close() {
+			closeCalled = true;
 		}
 	}
 
@@ -172,9 +185,8 @@ public class JavaUserDefinedScalarFunctions {
 			return i + j;
 		}
 
-		@Override
-		public TypeInformation<?> getResultType(Class<?>[] signature) {
-			return BasicTypeInfo.INT_TYPE_INFO;
+		public String eval(String a) {
+			return a;
 		}
 
 		@Override
@@ -189,7 +201,7 @@ public class JavaUserDefinedScalarFunctions {
 
 		@Override
 		public PythonEnv getPythonEnv() {
-			return null;
+			return new PythonEnv(PythonEnv.ExecType.PROCESS);
 		}
 	}
 
@@ -225,6 +237,34 @@ public class JavaUserDefinedScalarFunctions {
 		@Override
 		public PythonEnv getPythonEnv() {
 			return null;
+		}
+	}
+
+	/**
+	 * Test for Pandas Python Scalar Function.
+	 */
+	public static class PandasScalarFunction extends PythonScalarFunction {
+		public PandasScalarFunction(String name) {
+			super(name);
+		}
+
+		@Override
+		public PythonFunctionKind getPythonFunctionKind() {
+			return PythonFunctionKind.PANDAS;
+		}
+	}
+
+	/**
+	 * Test for Pandas Python Scalar Function.
+	 */
+	public static class BooleanPandasScalarFunction extends BooleanPythonScalarFunction {
+		public BooleanPandasScalarFunction(String name) {
+			super(name);
+		}
+
+		@Override
+		public PythonFunctionKind getPythonFunctionKind() {
+			return PythonFunctionKind.PANDAS;
 		}
 	}
 }

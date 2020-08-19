@@ -54,16 +54,13 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
-import org.apache.flink.testutils.junit.category.AlsoRunWithSchedulerNG;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -83,12 +80,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Test savepoint rescaling.
  */
 @RunWith(Parameterized.class)
-@Category(AlsoRunWithSchedulerNG.class)
 public class RescalingITCase extends TestLogger {
 
 	private static final int numTaskManagers = 2;
@@ -194,7 +191,7 @@ public class RescalingITCase extends TestLogger {
 			ClientUtils.submitJob(client, jobGraph);
 
 			// wait til the sources have emitted numberElements for each key and completed a checkpoint
-			SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
+			assertTrue(SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS));
 
 			// verify the current state
 
@@ -217,7 +214,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);
@@ -279,7 +276,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);
@@ -338,7 +335,7 @@ public class RescalingITCase extends TestLogger {
 			ClientUtils.submitJob(client, jobGraph);
 
 			// wait til the sources have emitted numberElements for each key and completed a checkpoint
-			SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
+			assertTrue(SubtaskIndexFlatMapper.workCompletedLatch.await(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS));
 
 			// verify the current state
 
@@ -361,7 +358,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);
@@ -463,13 +460,7 @@ public class RescalingITCase extends TestLogger {
 			StateSourceBase.workStartedLatch.await();
 
 			CompletableFuture<String> savepointPathFuture = FutureUtils.retryWithDelay(
-				() -> {
-					try {
-						return client.triggerSavepoint(jobID, null);
-					} catch (FlinkException e) {
-						return FutureUtils.completedExceptionally(e);
-					}
-				},
+				() -> client.triggerSavepoint(jobID, null),
 				(int) deadline.timeLeft().getSeconds() / 10,
 				Time.seconds(10),
 				(throwable) -> true,
@@ -478,7 +469,7 @@ public class RescalingITCase extends TestLogger {
 
 			final String savepointPath = savepointPathFuture.get(deadline.timeLeft().toMillis(), TimeUnit.MILLISECONDS);
 
-			client.cancel(jobID);
+			client.cancel(jobID).get();
 
 			while (!getRunningJobs(client).isEmpty()) {
 				Thread.sleep(50);

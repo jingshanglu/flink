@@ -19,6 +19,7 @@
 package org.apache.flink.test.checkpointing;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
@@ -32,14 +33,14 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.testutils.OneShotLatch;
+import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.Metric;
 import org.apache.flink.metrics.MetricConfig;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.reporter.MetricReporter;
 import org.apache.flink.runtime.concurrent.FutureUtils;
-import org.apache.flink.runtime.executiongraph.metrics.NumberOfFullRestartsGauge;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.JobStatus;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.state.CheckpointListener;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
@@ -421,13 +422,17 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 				checkpointCompletedIncludingData.compareAndSet(false, true);
 			}
 		}
+
+		@Override
+		public void notifyCheckpointAborted(long checkpointId) {
+		}
 	}
 
 	/**
-	 * Reporter that exposes the {@link NumberOfFullRestartsGauge} metric.
+	 * Reporter that exposes the {@code numRestarts} metric.
 	 */
 	public static class RestartReporter implements MetricReporter {
-		static volatile NumberOfFullRestartsGauge numRestarts = null;
+		static volatile Gauge<Long> numRestarts = null;
 
 		@Override
 		public void open(MetricConfig metricConfig) {
@@ -438,9 +443,9 @@ public class ZooKeeperHighAvailabilityITCase extends TestLogger {
 		}
 
 		@Override
-		public void notifyOfAddedMetric(Metric metric, String s, MetricGroup metricGroup) {
-			if (metric instanceof NumberOfFullRestartsGauge) {
-				numRestarts = (NumberOfFullRestartsGauge) metric;
+		public void notifyOfAddedMetric(Metric metric, String name, MetricGroup metricGroup) {
+			if (name.equals(MetricNames.NUM_RESTARTS)) {
+				numRestarts = (Gauge<Long>) metric;
 			}
 		}
 

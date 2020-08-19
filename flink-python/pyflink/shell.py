@@ -16,7 +16,6 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 ################################################################################
-import codecs
 import platform
 import sys
 
@@ -27,6 +26,9 @@ from pyflink.table import *
 from pyflink.table.catalog import *
 from pyflink.table.descriptors import *
 from pyflink.table.window import *
+from pyflink.metrics import *
+from pyflink.ml.api import *
+from pyflink.ml.lib import *
 
 utf8_out = open(sys.stdout.fileno(), mode='w', encoding='utf8', buffering=1)
 
@@ -97,7 +99,7 @@ NOTE: Use the prebound Table Environment to implement batch or streaming Table p
     *                  .field("a", DataTypes.BIGINT())
     *                  .field("b", DataTypes.STRING())
     *                  .field("c", DataTypes.STRING())) \\
-    *     .register_table_sink("batch_sink")
+    *     .create_temporary_table("batch_sink")
     *
     * t.select("a + 1, b, c").insert_into("batch_sink")
     *
@@ -127,7 +129,7 @@ NOTE: Use the prebound Table Environment to implement batch or streaming Table p
     *                  .field("a", DataTypes.BIGINT())
     *                  .field("b", DataTypes.STRING())
     *                  .field("c", DataTypes.STRING())) \\
-    *     .register_table_sink("stream_sink")
+    *     .create_temporary_table("stream_sink")
     * 
     * t.select("a + 1, b, c").insert_into("stream_sink")
     *

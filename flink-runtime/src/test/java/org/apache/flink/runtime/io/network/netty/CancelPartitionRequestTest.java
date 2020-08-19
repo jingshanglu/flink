@@ -92,8 +92,7 @@ public class CancelPartitionRequestTest {
 					}
 				});
 
-			NettyProtocol protocol = new NettyProtocol(
-					partitions, mock(TaskEventDispatcher.class), true);
+			NettyProtocol protocol = new NettyProtocol(partitions, mock(TaskEventDispatcher.class));
 
 			serverAndClient = initServerAndClient(protocol);
 
@@ -142,8 +141,7 @@ public class CancelPartitionRequestTest {
 						}
 					});
 
-			NettyProtocol protocol = new NettyProtocol(
-					partitions, mock(TaskEventDispatcher.class), true);
+			NettyProtocol protocol = new NettyProtocol(partitions, mock(TaskEventDispatcher.class));
 
 			serverAndClient = initServerAndClient(protocol);
 
@@ -213,12 +211,11 @@ public class CancelPartitionRequestTest {
 		}
 
 		@Override
-		public boolean nextBufferIsEvent() {
-			return false;
+		public void resumeConsumption() {
 		}
 
 		@Override
-		public boolean isAvailable() {
+		public boolean isAvailable(int numCreditsAvailable) {
 			return true;
 		}
 

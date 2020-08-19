@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.dispatcher;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.BlobServerOptions;
 import org.apache.flink.configuration.Configuration;
@@ -37,7 +38,6 @@ import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.runtime.highavailability.RunningJobsRegistry;
 import org.apache.flink.runtime.highavailability.TestingHighAvailabilityServices;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobmanager.JobGraphWriter;
 import org.apache.flink.runtime.jobmaster.JobManagerRunner;
@@ -54,7 +54,7 @@ import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.rpc.TestingRpcService;
 import org.apache.flink.runtime.testtasks.NoOpInvokable;
 import org.apache.flink.runtime.testutils.TestingJobGraphStore;
-import org.apache.flink.runtime.util.TestingFatalErrorHandler;
+import org.apache.flink.runtime.util.TestingFatalErrorHandlerResource;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
@@ -75,7 +75,6 @@ import javax.annotation.Nonnull;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -97,6 +96,9 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 	@Rule
 	public ExpectedException expectedException = ExpectedException.none();
 
+	@Rule
+	public final TestingFatalErrorHandlerResource testingFatalErrorHandlerResource = new TestingFatalErrorHandlerResource();
+
 	private static final Time timeout = Time.seconds(10L);
 
 	private static TestingRpcService rpcService;
@@ -116,8 +118,6 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 	private TestingDispatcher dispatcher;
 
 	private DispatcherGateway dispatcherGateway;
-
-	private TestingFatalErrorHandler fatalErrorHandler;
 
 	private BlobServer blobServer;
 
@@ -141,7 +141,6 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 		testVertex.setInvokableClass(NoOpInvokable.class);
 		jobId = new JobID();
 		jobGraph = new JobGraph(jobId, "testJob", testVertex);
-		jobGraph.setAllowQueuedScheduling(true);
 
 		configuration = new Configuration();
 		configuration.setString(BlobServerOptions.STORAGE_DIRECTORY, temporaryFolder.newFolder().getAbsolutePath());
@@ -173,8 +172,6 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 
 		// verify that we stored the blob also in the BlobStore
 		assertThat(storedHABlobFuture.get(), equalTo(permanentBlobKey));
-
-		fatalErrorHandler = new TestingFatalErrorHandler();
 	}
 
 	private TestingJobManagerRunnerFactory startDispatcherAndSubmitJob() throws Exception {
@@ -195,9 +192,8 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 		final MemoryArchivedExecutionGraphStore archivedExecutionGraphStore = new MemoryArchivedExecutionGraphStore();
 		dispatcher = new TestingDispatcher(
 			rpcService,
-			Dispatcher.DISPATCHER_NAME + UUID.randomUUID(),
 			DispatcherId.generate(),
-			Collections.emptyList(),
+			new DefaultDispatcherBootstrap(Collections.emptyList()),
 			new DispatcherServices(
 				configuration,
 				highAvailabilityServices,
@@ -205,7 +201,7 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 				blobServer,
 				heartbeatServices,
 				archivedExecutionGraphStore,
-				fatalErrorHandler,
+				testingFatalErrorHandlerResource.getFatalErrorHandler(),
 				VoidHistoryServerArchivist.INSTANCE,
 				null,
 				UnregisteredMetricGroups.createUnregisteredJobManagerMetricGroup(),
@@ -221,10 +217,6 @@ public class DispatcherResourceCleanupTest extends TestLogger {
 	public void teardown() throws Exception {
 		if (dispatcher != null) {
 			dispatcher.close();
-		}
-
-		if (fatalErrorHandler != null) {
-			fatalErrorHandler.rethrowError();
 		}
 	}
 

@@ -22,20 +22,28 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.fs.FSDataInputStream;
+import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.mock.Whitebox;
+import org.apache.flink.runtime.OperatorIDPair;
+import org.apache.flink.runtime.concurrent.Executors;
 import org.apache.flink.runtime.concurrent.ManuallyTriggeredScheduledExecutor;
+import org.apache.flink.runtime.concurrent.ScheduledExecutor;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.Execution;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
+import org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils;
 import org.apache.flink.runtime.executiongraph.ExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
 import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
 import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway.CheckpointConsumer;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
+import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration.CheckpointCoordinatorConfigurationBuilder;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
 import org.apache.flink.runtime.jobmaster.LogicalSlot;
 import org.apache.flink.runtime.jobmaster.TestingLogicalSlotBuilder;
+import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
 import org.apache.flink.runtime.state.ChainedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupRangeOffsets;
@@ -43,7 +51,11 @@ import org.apache.flink.runtime.state.KeyGroupsStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.OperatorStreamStateHandle;
+import org.apache.flink.runtime.state.SharedStateRegistry;
+import org.apache.flink.runtime.state.SharedStateRegistryFactory;
+import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
+import org.apache.flink.runtime.state.memory.MemoryStateBackend;
 import org.apache.flink.runtime.testutils.CommonTestUtils;
 import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.Preconditions;
@@ -55,8 +67,8 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -65,10 +77,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
-import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -160,11 +169,13 @@ public class CheckpointCoordinatorTestingUtils {
 			++idx;
 		}
 
-		ByteStreamStateHandle streamStateHandle = new ByteStreamStateHandle(
-			String.valueOf(UUID.randomUUID()),
-			serializationWithOffsets.f0);
+		return new OperatorStreamStateHandle(offsetsMap, generateByteStreamStateHandle(serializationWithOffsets.f0));
+	}
 
-		return new OperatorStreamStateHandle(offsetsMap, streamStateHandle);
+	private static ByteStreamStateHandle generateByteStreamStateHandle(byte[] bytes) {
+		return new ByteStreamStateHandle(
+			String.valueOf(UUID.randomUUID()),
+			bytes);
 	}
 
 	static Tuple2<byte[], List<long[]>> serializeTogetherAndTrackOffsets(
@@ -349,19 +360,22 @@ public class CheckpointCoordinatorTestingUtils {
 		when(executionJobVertex.getParallelism()).thenReturn(parallelism);
 		when(executionJobVertex.getMaxParallelism()).thenReturn(maxParallelism);
 		when(executionJobVertex.isMaxParallelismConfigured()).thenReturn(true);
-		when(executionJobVertex.getOperatorIDs()).thenReturn(jobVertexIDs);
-		when(executionJobVertex.getUserDefinedOperatorIDs()).thenReturn(Arrays.asList(new OperatorID[jobVertexIDs.size()]));
+		List<OperatorIDPair> operatorIDPairs = new ArrayList<>();
+		for (OperatorID operatorID : jobVertexIDs) {
+			operatorIDPairs.add(OperatorIDPair.generatedIDOnly(operatorID));
+		}
+		when(executionJobVertex.getOperatorIDs()).thenReturn(operatorIDPairs);
 
 		return executionJobVertex;
 	}
 
-	static ExecutionVertex mockExecutionVertex(ExecutionAttemptID attemptID) throws Exception {
+	static ExecutionVertex mockExecutionVertex(ExecutionAttemptID attemptID) {
 		return mockExecutionVertex(attemptID, (LogicalSlot) null);
 	}
 
 	static ExecutionVertex mockExecutionVertex(
 		ExecutionAttemptID attemptID,
-		CheckpointConsumer checkpointConsumer) throws Exception {
+		CheckpointConsumer checkpointConsumer) {
 
 		final SimpleAckingTaskManagerGateway taskManagerGateway = new SimpleAckingTaskManagerGateway();
 		taskManagerGateway.setCheckpointConsumer(checkpointConsumer);
@@ -370,7 +384,7 @@ public class CheckpointCoordinatorTestingUtils {
 
 	static ExecutionVertex mockExecutionVertex(
 		ExecutionAttemptID attemptID,
-		TaskManagerGateway taskManagerGateway) throws Exception {
+		TaskManagerGateway taskManagerGateway) {
 
 		TestingLogicalSlotBuilder slotBuilder = new TestingLogicalSlotBuilder();
 		slotBuilder.setTaskManagerGateway(taskManagerGateway);
@@ -380,7 +394,7 @@ public class CheckpointCoordinatorTestingUtils {
 
 	static ExecutionVertex mockExecutionVertex(
 		ExecutionAttemptID attemptID,
-		@Nullable LogicalSlot slot) throws Exception {
+		@Nullable LogicalSlot slot) {
 
 		JobVertexID jobVertexID = new JobVertexID();
 		return mockExecutionVertex(
@@ -400,7 +414,7 @@ public class CheckpointCoordinatorTestingUtils {
 		int parallelism,
 		int maxParallelism,
 		ExecutionState state,
-		ExecutionState ... successiveStates) throws Exception {
+		ExecutionState ... successiveStates) {
 
 		return mockExecutionVertex(
 			attemptID,
@@ -421,9 +435,10 @@ public class CheckpointCoordinatorTestingUtils {
 		int parallelism,
 		int maxParallelism,
 		ExecutionState state,
-		ExecutionState ... successiveStates) throws Exception {
+		ExecutionState ... successiveStates) {
 
 		ExecutionVertex vertex = mock(ExecutionVertex.class);
+		when(vertex.getID()).thenReturn(ExecutionGraphTestUtils.createRandomExecutionVertexId());
 
 		final Execution exec = spy(new Execution(
 			mock(Executor.class),
@@ -435,11 +450,7 @@ public class CheckpointCoordinatorTestingUtils {
 		));
 		if (slot != null) {
 			// is there a better way to do this?
-			//noinspection unchecked
-			AtomicReferenceFieldUpdater<Execution, LogicalSlot> slotUpdater =
-				(AtomicReferenceFieldUpdater<Execution, LogicalSlot>)
-					Whitebox.getInternalState(exec, "ASSIGNED_SLOT_UPDATER");
-			slotUpdater.compareAndSet(exec, null, slot);
+			Whitebox.setInternalState(exec, "assignedResource", slot);
 		}
 
 		when(exec.getAttemptId()).thenReturn(attemptID);
@@ -451,7 +462,11 @@ public class CheckpointCoordinatorTestingUtils {
 		when(vertex.getMaxParallelism()).thenReturn(maxParallelism);
 
 		ExecutionJobVertex jobVertex = mock(ExecutionJobVertex.class);
-		when(jobVertex.getOperatorIDs()).thenReturn(jobVertexIDs);
+		List<OperatorIDPair> operatorIDPairs = new ArrayList<>();
+		for (OperatorID operatorID : jobVertexIDs) {
+			operatorIDPairs.add(OperatorIDPair.generatedIDOnly(operatorID));
+		}
+		when(jobVertex.getOperatorIDs()).thenReturn(operatorIDPairs);
 
 		when(vertex.getJobVertex()).thenReturn(jobVertex);
 
@@ -468,7 +483,7 @@ public class CheckpointCoordinatorTestingUtils {
 
 		TaskStateSnapshot subtaskStates = spy(new TaskStateSnapshot());
 		OperatorSubtaskState subtaskState = spy(new OperatorSubtaskState(
-			partitionableState, null, partitionedKeyGroupState, null)
+			partitionableState, null, partitionedKeyGroupState, null, null, null)
 		);
 
 		subtaskStates.putSubtaskStateByOperatorID(OperatorID.fromJobVertexID(jobVertexID), subtaskState);
@@ -505,9 +520,7 @@ public class CheckpointCoordinatorTestingUtils {
 
 		KeyGroupRangeOffsets keyGroupRangeOffsets = new KeyGroupRangeOffsets(keyGroupRange, serializedDataWithOffsets.f1.get(0));
 
-		ByteStreamStateHandle allSerializedStatesHandle = new ByteStreamStateHandle(
-			String.valueOf(UUID.randomUUID()),
-			serializedDataWithOffsets.f0);
+		ByteStreamStateHandle allSerializedStatesHandle = generateByteStreamStateHandle(serializedDataWithOffsets.f0);
 
 		return new KeyGroupsStateHandle(keyGroupRangeOffsets, allSerializedStatesHandle);
 	}
@@ -558,12 +571,174 @@ public class CheckpointCoordinatorTestingUtils {
 		when(vertex.getMaxParallelism()).thenReturn(vertices.length);
 		when(vertex.getJobVertexId()).thenReturn(id);
 		when(vertex.getTaskVertices()).thenReturn(vertices);
-		when(vertex.getOperatorIDs()).thenReturn(Collections.singletonList(OperatorID.fromJobVertexID(id)));
-		when(vertex.getUserDefinedOperatorIDs()).thenReturn(Collections.<OperatorID>singletonList(null));
+		when(vertex.getOperatorIDs()).thenReturn(Collections.singletonList(OperatorIDPair.generatedIDOnly(OperatorID.fromJobVertexID(id))));
 
 		for (ExecutionVertex v : vertices) {
 			when(v.getJobVertex()).thenReturn(vertex);
 		}
 		return vertex;
+	}
+
+	/**
+	 * A helper builder for {@link CheckpointCoordinator} to deduplicate test codes.
+	 */
+	public static class CheckpointCoordinatorBuilder {
+		private JobID jobId = new JobID();
+
+		private CheckpointCoordinatorConfiguration checkpointCoordinatorConfiguration =
+			new CheckpointCoordinatorConfigurationBuilder().setMaxConcurrentCheckpoints(Integer.MAX_VALUE).build();
+
+		private ExecutionVertex[] tasksToTrigger;
+
+		private ExecutionVertex[] tasksToWaitFor;
+
+		private ExecutionVertex[] tasksToCommitTo;
+
+		private Collection<OperatorCoordinatorCheckpointContext> coordinatorsToCheckpoint = Collections.emptyList();
+
+		private CheckpointIDCounter checkpointIDCounter =
+			new StandaloneCheckpointIDCounter();
+
+		private CompletedCheckpointStore completedCheckpointStore =
+			new StandaloneCompletedCheckpointStore(1);
+
+		private StateBackend checkpointStateBackend = new MemoryStateBackend();
+
+		private Executor ioExecutor = Executors.directExecutor();
+
+		private ScheduledExecutor timer = new ManuallyTriggeredScheduledExecutor();
+
+		private SharedStateRegistryFactory sharedStateRegistryFactory =
+			SharedStateRegistry.DEFAULT_FACTORY;
+
+		private CheckpointFailureManager failureManager =
+			new CheckpointFailureManager(0, NoOpFailJobCall.INSTANCE);
+
+		public CheckpointCoordinatorBuilder() {
+			ExecutionVertex vertex = mockExecutionVertex(new ExecutionAttemptID());
+			ExecutionVertex[] defaultVertices = new ExecutionVertex[] { vertex };
+			tasksToTrigger = defaultVertices;
+			tasksToWaitFor = defaultVertices;
+			tasksToCommitTo = defaultVertices;
+		}
+
+		public CheckpointCoordinatorBuilder setJobId(JobID jobId) {
+			this.jobId = jobId;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setCheckpointCoordinatorConfiguration(
+			CheckpointCoordinatorConfiguration checkpointCoordinatorConfiguration) {
+			this.checkpointCoordinatorConfiguration = checkpointCoordinatorConfiguration;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setTasks(ExecutionVertex[] tasks) {
+			this.tasksToTrigger = tasks;
+			this.tasksToWaitFor = tasks;
+			this.tasksToCommitTo = tasks;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setTasksToTrigger(ExecutionVertex[] tasksToTrigger) {
+			this.tasksToTrigger = tasksToTrigger;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setTasksToWaitFor(ExecutionVertex[] tasksToWaitFor) {
+			this.tasksToWaitFor = tasksToWaitFor;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setTasksToCommitTo(ExecutionVertex[] tasksToCommitTo) {
+			this.tasksToCommitTo = tasksToCommitTo;
+			return this;
+		}
+
+		public void setCoordinatorsToCheckpoint(Collection<OperatorCoordinatorCheckpointContext> coordinatorsToCheckpoint) {
+			this.coordinatorsToCheckpoint = coordinatorsToCheckpoint;
+		}
+
+		public CheckpointCoordinatorBuilder setCheckpointIDCounter(
+			CheckpointIDCounter checkpointIDCounter) {
+			this.checkpointIDCounter = checkpointIDCounter;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setCompletedCheckpointStore(
+			CompletedCheckpointStore completedCheckpointStore) {
+			this.completedCheckpointStore = completedCheckpointStore;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setCheckpointStateBackend(StateBackend checkpointStateBackend) {
+			this.checkpointStateBackend = checkpointStateBackend;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setIoExecutor(Executor ioExecutor) {
+			this.ioExecutor = ioExecutor;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setTimer(ScheduledExecutor timer) {
+			this.timer = timer;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setSharedStateRegistryFactory(
+			SharedStateRegistryFactory sharedStateRegistryFactory) {
+			this.sharedStateRegistryFactory = sharedStateRegistryFactory;
+			return this;
+		}
+
+		public CheckpointCoordinatorBuilder setFailureManager(
+			CheckpointFailureManager failureManager) {
+			this.failureManager = failureManager;
+			return this;
+		}
+
+		public CheckpointCoordinator build() {
+			return new CheckpointCoordinator(
+				jobId,
+				checkpointCoordinatorConfiguration,
+				tasksToTrigger,
+				tasksToWaitFor,
+				tasksToCommitTo,
+				coordinatorsToCheckpoint,
+				checkpointIDCounter,
+				completedCheckpointStore,
+				checkpointStateBackend,
+				ioExecutor,
+				timer,
+				sharedStateRegistryFactory,
+				failureManager);
+		}
+	}
+
+	/**
+	 * A test implementation of {@link SimpleVersionedSerializer} for String type.
+	 */
+	public static final class StringSerializer implements SimpleVersionedSerializer<String> {
+
+		static final int VERSION = 77;
+
+		@Override
+		public int getVersion() {
+			return VERSION;
+		}
+
+		@Override
+		public byte[] serialize(String checkpointData) throws IOException {
+			return checkpointData.getBytes(StandardCharsets.UTF_8);
+		}
+
+		@Override
+		public String deserialize(int version, byte[] serialized) throws IOException {
+			if (version != VERSION) {
+				throw new IOException("version mismatch");
+			}
+			return new String(serialized, StandardCharsets.UTF_8);
+		}
 	}
 }

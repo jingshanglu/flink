@@ -78,6 +78,7 @@ fi
 OPTIONS=("${OPTIONS[@]:0:$LAST}")
 
 export SUBMIT_ARGS=${OPTIONS[@]}
+
 # -i: interactive
 # -m: execute shell.py in the zip package
 ${PYFLINK_PYTHON} -i -m pyflink.shell

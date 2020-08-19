@@ -20,6 +20,7 @@ package org.apache.flink.mesos.entrypoint;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.core.plugin.PluginManager;
 import org.apache.flink.mesos.runtime.clusterframework.MesosResourceManagerFactory;
 import org.apache.flink.mesos.runtime.clusterframework.services.MesosServices;
 import org.apache.flink.mesos.runtime.clusterframework.services.MesosServicesUtils;
@@ -31,6 +32,7 @@ import org.apache.flink.runtime.entrypoint.ClusterEntrypoint;
 import org.apache.flink.runtime.entrypoint.JobClusterEntrypoint;
 import org.apache.flink.runtime.entrypoint.component.DefaultDispatcherResourceManagerComponentFactory;
 import org.apache.flink.runtime.entrypoint.component.FileJobGraphRetriever;
+import org.apache.flink.runtime.util.ClusterEntrypointUtils;
 import org.apache.flink.runtime.util.EnvironmentInformation;
 import org.apache.flink.runtime.util.JvmShutdownSafeguard;
 import org.apache.flink.runtime.util.SignalHandler;
@@ -40,6 +42,7 @@ import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.PosixParser;
 
+import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -68,8 +71,8 @@ public class MesosJobClusterEntrypoint extends JobClusterEntrypoint {
 	}
 
 	@Override
-	protected void initializeServices(Configuration config) throws Exception {
-		super.initializeServices(config);
+	protected void initializeServices(Configuration config, PluginManager pluginManager) throws Exception {
+		super.initializeServices(config, pluginManager);
 
 		final String hostname = config.getString(JobManagerOptions.ADDRESS);
 
@@ -94,12 +97,12 @@ public class MesosJobClusterEntrypoint extends JobClusterEntrypoint {
 	}
 
 	@Override
-	protected DefaultDispatcherResourceManagerComponentFactory createDispatcherResourceManagerComponentFactory(Configuration configuration) {
+	protected DefaultDispatcherResourceManagerComponentFactory createDispatcherResourceManagerComponentFactory(Configuration configuration) throws IOException {
 		return DefaultDispatcherResourceManagerComponentFactory.createJobComponentFactory(
 			new MesosResourceManagerFactory(
 				mesosServices,
 				schedulerConfiguration),
-			FileJobGraphRetriever.createFrom(configuration));
+			FileJobGraphRetriever.createFrom(configuration, ClusterEntrypointUtils.tryFindUserLibDirectory().orElse(null)));
 	}
 
 	public static void main(String[] args) {

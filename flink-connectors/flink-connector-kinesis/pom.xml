@@ -26,16 +26,16 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-connectors</artifactId>
-		<version>1.10-SNAPSHOT</version>
+		<version>1.12-SNAPSHOT</version>
 		<relativePath>..</relativePath>
 	</parent>
 
 	<artifactId>flink-connector-kinesis_${scala.binary.version}</artifactId>
-	<name>flink-connector-kinesis</name>
+	<name>Flink : Connectors : Kinesis</name>
 	<properties>
-		<aws.sdk.version>1.11.603</aws.sdk.version>
+		<aws.sdk.version>1.11.754</aws.sdk.version>
 		<aws.kinesis-kcl.version>1.11.2</aws.kinesis-kcl.version>
-		<aws.kinesis-kpl.version>0.13.1</aws.kinesis-kpl.version>
+		<aws.kinesis-kpl.version>0.14.0</aws.kinesis-kpl.version>
 		<aws.dynamodbstreams-kinesis-adapter.version>1.5.0</aws.dynamodbstreams-kinesis-adapter.version>
 	</properties>
 
@@ -46,6 +46,13 @@ under the License.
 		<dependency>
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-streaming-java_${scala.binary.version}</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-clients_${scala.binary.version}</artifactId>
 			<version>${project.version}</version>
 			<scope>provided</scope>
 		</dependency>
@@ -82,16 +89,16 @@ under the License.
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-test-utils_${scala.binary.version}</artifactId>
+			<artifactId>flink-core</artifactId>
 			<version>${project.version}</version>
+			<type>test-jar</type>
 			<scope>test</scope>
 		</dependency>
 
 		<dependency>
-			<groupId>org.apache.flink</groupId>
-			<artifactId>flink-core</artifactId>
-			<version>${project.version}</version>
-			<type>test-jar</type>
+			<groupId>com.amazonaws</groupId>
+			<artifactId>amazon-kinesis-aggregator</artifactId>
+			<version>1.0.3</version>
 			<scope>test</scope>
 		</dependency>
 
@@ -145,6 +152,15 @@ under the License.
 			</exclusions>
 		</dependency>
 
+		<dependency>
+			<!-- KPL requires jaxb-api for javax.xml.bind.DatatypeConverter -->
+			<groupId>javax.xml.bind</groupId>
+			<artifactId>jaxb-api</artifactId>
+			<version>${jaxb.api.version}</version>
+			<!-- packaged in flink-dist -->
+			<scope>provided</scope>
+		</dependency>
+
 	</dependencies>
 
 	<dependencyManagement>
@@ -169,6 +185,11 @@ under the License.
 						<goals>
 							<goal>test-jar</goal>
 						</goals>
+						<configuration>
+							<includes>
+								<include>**/org/apache/flink/streaming/connectors/kinesis/testutils/**</include>
+							</includes>
+						</configuration>
 					</execution>
 				</executions>
 			</plugin>
@@ -190,12 +211,11 @@ under the License.
 									<include>com.amazonaws:*</include>
 									<include>com.google.protobuf:*</include>
 									<include>org.apache.httpcomponents:*</include>
-									<!-- Java 11 specific inclusion; should be a no-op for other versions -->
-									<include>javax.xml.bind:jaxb-api</include>
 								</includes>
 							</artifactSet>
 							<relocations combine.children="override">
-								<!-- DO NOT RELOCATE GUAVA IN THIS PACKAGE -->
+								<!-- Do not relocate guava because it is exposed in the Kinesis API (KinesisProducer#addUserRecord).
+								 	Users may be using other affected API's, so relocations may break user-code -->
 								<relocation>
 									<pattern>com.google.protobuf</pattern>
 									<shadedPattern>org.apache.flink.kinesis.shaded.com.google.protobuf</shadedPattern>
@@ -209,27 +229,18 @@ under the License.
 									<shadedPattern>org.apache.flink.kinesis.shaded.org.apache.http</shadedPattern>
 								</relocation>
 							</relocations>
+							<filters>
+								<filter>
+									<artifact>com.amazonaws:amazon-kinesis-producer</artifact>
+									<excludes>
+										<exclude>META-INF/THIRD_PARTY_NOTICES</exclude>
+									</excludes>
+								</filter>
+							</filters>
 						</configuration>
 					</execution>
 				</executions>
 			</plugin>
 		</plugins>
 	</build>
-
-	<profiles>
-		<profile>
-			<id>java11</id>
-			<activation>
-				<jdk>11</jdk>
-			</activation>
-			<dependencies>
-				<dependency>
-					<!-- KPL requires jaxb-api for javax.xml.bind.DatatypeConverter -->
-					<groupId>javax.xml.bind</groupId>
-					<artifactId>jaxb-api</artifactId>
-					<version>2.3.0</version>
-				</dependency>
-			</dependencies>
-		</profile>
-	</profiles>
 </project>

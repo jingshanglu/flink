@@ -19,15 +19,16 @@
 package org.apache.flink.client;
 
 import org.apache.flink.api.common.JobExecutionResult;
-import org.apache.flink.api.common.JobSubmissionResult;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.client.program.ContextEnvironment;
-import org.apache.flink.client.program.ContextEnvironmentFactory;
-import org.apache.flink.client.program.DetachedJobExecutionResult;
 import org.apache.flink.client.program.PackagedProgram;
 import org.apache.flink.client.program.ProgramInvocationException;
-import org.apache.flink.client.program.ProgramMissingJobException;
-import org.apache.flink.core.fs.Path;
+import org.apache.flink.client.program.StreamContextEnvironment;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CoreOptions;
+import org.apache.flink.configuration.DeploymentOptions;
+import org.apache.flink.core.execution.DetachedJobExecutionResult;
+import org.apache.flink.core.execution.PipelineExecutorServiceLoader;
 import org.apache.flink.runtime.client.JobExecutionException;
 import org.apache.flink.runtime.execution.librarycache.FlinkUserCodeClassLoaders;
 import org.apache.flink.runtime.jobgraph.JobGraph;
@@ -37,15 +38,13 @@ import org.apache.flink.util.ExceptionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.File;
 import java.io.IOException;
-import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.jar.JarFile;
 
+import static org.apache.flink.util.FlinkUserCodeClassLoader.NOOP_EXCEPTION_HANDLER;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
@@ -56,42 +55,11 @@ public enum ClientUtils {
 
 	private static final Logger LOG = LoggerFactory.getLogger(ClientUtils.class);
 
-	/**
-	 * Adds the given jar files to the {@link JobGraph} via {@link JobGraph#addJar}. This will
-	 * throw an exception if a jar URL is not valid.
-	 */
-	public static void addJarFiles(JobGraph jobGraph, List<URL> jarFilesToAttach) {
-		for (URL jar : jarFilesToAttach) {
-			try {
-				jobGraph.addJar(new Path(jar.toURI()));
-			} catch (URISyntaxException e) {
-				throw new RuntimeException("URL is invalid. This should not happen.", e);
-			}
-		}
-	}
-
-	public static void checkJarFile(URL jar) throws IOException {
-		File jarFile;
-		try {
-			jarFile = new File(jar.toURI());
-		} catch (URISyntaxException e) {
-			throw new IOException("JAR file path is invalid '" + jar + '\'');
-		}
-		if (!jarFile.exists()) {
-			throw new IOException("JAR file does not exist '" + jarFile.getAbsolutePath() + '\'');
-		}
-		if (!jarFile.canRead()) {
-			throw new IOException("JAR file can't be read '" + jarFile.getAbsolutePath() + '\'');
-		}
-
-		try (JarFile ignored = new JarFile(jarFile)) {
-			// verify that we can open the Jar file
-		} catch (IOException e) {
-			throw new IOException("Error while opening jar file '" + jarFile.getAbsolutePath() + '\'', e);
-		}
-	}
-
-	public static ClassLoader buildUserCodeClassLoader(List<URL> jars, List<URL> classpaths, ClassLoader parent) {
+	public static URLClassLoader buildUserCodeClassLoader(
+			List<URL> jars,
+			List<URL> classpaths,
+			ClassLoader parent,
+			Configuration configuration) {
 		URL[] urls = new URL[jars.size() + classpaths.size()];
 		for (int i = 0; i < jars.size(); i++) {
 			urls[i] = jars.get(i);
@@ -99,7 +67,19 @@ public enum ClientUtils {
 		for (int i = 0; i < classpaths.size(); i++) {
 			urls[i + jars.size()] = classpaths.get(i);
 		}
-		return FlinkUserCodeClassLoaders.parentFirst(urls, parent);
+		final String[] alwaysParentFirstLoaderPatterns = CoreOptions.getParentFirstLoaderPatterns(configuration);
+		final String classLoaderResolveOrder =
+			configuration.getString(CoreOptions.CLASSLOADER_RESOLVE_ORDER);
+		FlinkUserCodeClassLoaders.ResolveOrder resolveOrder =
+			FlinkUserCodeClassLoaders.ResolveOrder.fromString(classLoaderResolveOrder);
+		final boolean checkClassloaderLeak = configuration.getBoolean(CoreOptions.CHECK_LEAKED_CLASSLOADER);
+		return FlinkUserCodeClassLoaders.create(
+			resolveOrder,
+			urls,
+			parent,
+			alwaysParentFirstLoaderPatterns,
+			NOOP_EXCEPTION_HANDLER,
+			checkClassloaderLeak);
 	}
 
 	public static JobExecutionResult submitJob(
@@ -110,7 +90,6 @@ public enum ClientUtils {
 		try {
 			return client
 				.submitJob(jobGraph)
-				.thenApply(JobSubmissionResult::getJobID)
 				.thenApply(DetachedJobExecutionResult::new)
 				.get();
 		} catch (InterruptedException | ExecutionException e) {
@@ -132,7 +111,6 @@ public enum ClientUtils {
 		try {
 			jobResult = client
 				.submitJob(jobGraph)
-				.thenApply(JobSubmissionResult::getJobID)
 				.thenCompose(client::requestJobResult)
 				.get();
 		} catch (InterruptedException | ExecutionException e) {
@@ -147,45 +125,41 @@ public enum ClientUtils {
 		}
 	}
 
-	public static JobSubmissionResult executeProgram(
-			ClusterClient<?> client,
+	public static void executeProgram(
+			PipelineExecutorServiceLoader executorServiceLoader,
+			Configuration configuration,
 			PackagedProgram program,
-			int parallelism,
-			boolean detached) throws ProgramMissingJobException, ProgramInvocationException {
+			boolean enforceSingleJobExecution,
+			boolean suppressSysout) throws ProgramInvocationException {
+		checkNotNull(executorServiceLoader);
+		final ClassLoader userCodeClassLoader = program.getUserCodeClassLoader();
 		final ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
 		try {
-			Thread.currentThread().setContextClassLoader(program.getUserCodeClassLoader());
+			Thread.currentThread().setContextClassLoader(userCodeClassLoader);
 
-			LOG.info("Starting program (detached: {})", detached);
+			LOG.info("Starting program (detached: {})", !configuration.getBoolean(DeploymentOptions.ATTACHED));
 
-			final List<URL> libraries = program.getAllLibraries();
+			ContextEnvironment.setAsContext(
+				executorServiceLoader,
+				configuration,
+				userCodeClassLoader,
+				enforceSingleJobExecution,
+				suppressSysout);
 
-			final AtomicReference<JobExecutionResult> jobExecutionResult = new AtomicReference<>();
-
-			ContextEnvironmentFactory factory = new ContextEnvironmentFactory(
-				client,
-				libraries,
-				program.getClasspaths(),
-				program.getUserCodeClassLoader(),
-				parallelism,
-				detached,
-				program.getSavepointSettings(),
-				jobExecutionResult);
-			ContextEnvironment.setAsContext(factory);
+			StreamContextEnvironment.setAsContext(
+				executorServiceLoader,
+				configuration,
+				userCodeClassLoader,
+				enforceSingleJobExecution,
+				suppressSysout);
 
 			try {
 				program.invokeInteractiveModeForExecution();
-
-				JobExecutionResult result = jobExecutionResult.get();
-				if (result == null) {
-					throw new ProgramMissingJobException("The program didn't contain a Flink job.");
-				}
-				return result;
 			} finally {
-				ContextEnvironment.unsetContext();
+				ContextEnvironment.unsetAsContext();
+				StreamContextEnvironment.unsetAsContext();
 			}
-		}
-		finally {
+		} finally {
 			Thread.currentThread().setContextClassLoader(contextClassLoader);
 		}
 	}

@@ -30,8 +30,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 /**
  * A simple implementation of {@link SchedulingResultPartition} for testing.
  */
-public class TestingSchedulingResultPartition
-	implements SchedulingResultPartition<TestingSchedulingExecutionVertex, TestingSchedulingResultPartition> {
+public class TestingSchedulingResultPartition implements SchedulingResultPartition {
 
 	private final IntermediateDataSetID intermediateDataSetID;
 
@@ -91,13 +90,17 @@ public class TestingSchedulingResultPartition
 		this.producer = checkNotNull(producer);
 	}
 
+	void setState(ResultPartitionState state) {
+		this.state = state;
+	}
+
 	/**
 	 * Builder for {@link TestingSchedulingResultPartition}.
 	 */
 	public static final class Builder {
 		private IntermediateDataSetID intermediateDataSetId = new IntermediateDataSetID();
 		private ResultPartitionType resultPartitionType = ResultPartitionType.BLOCKING;
-		private ResultPartitionState resultPartitionState = ResultPartitionState.DONE;
+		private ResultPartitionState resultPartitionState = ResultPartitionState.CONSUMABLE;
 
 		Builder withIntermediateDataSetID(IntermediateDataSetID intermediateDataSetId) {
 			this.intermediateDataSetId = intermediateDataSetId;
