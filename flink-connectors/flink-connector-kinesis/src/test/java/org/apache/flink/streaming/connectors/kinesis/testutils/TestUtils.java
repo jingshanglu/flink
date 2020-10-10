@@ -19,12 +19,22 @@ package org.apache.flink.streaming.connectors.kinesis.testutils;
 
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.streaming.connectors.kinesis.config.AWSConfigConstants;
+import org.apache.flink.streaming.connectors.kinesis.internals.publisher.RecordBatch;
+import org.apache.flink.streaming.connectors.kinesis.internals.publisher.RecordPublisher;
+import org.apache.flink.streaming.connectors.kinesis.model.SequenceNumber;
+import org.apache.flink.streaming.connectors.kinesis.model.StreamShardHandle;
 
 import com.amazonaws.kinesis.agg.AggRecord;
 import com.amazonaws.kinesis.agg.RecordAggregator;
+import com.amazonaws.services.kinesis.clientlibrary.types.UserRecord;
+import com.amazonaws.services.kinesis.model.HashKeyRange;
 import com.amazonaws.services.kinesis.model.Record;
+import com.amazonaws.services.kinesis.model.SequenceNumberRange;
+import com.amazonaws.services.kinesis.model.Shard;
 import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.commons.lang3.StringUtils;
 
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Date;
@@ -32,6 +42,12 @@ import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConstants.EFORegistrationType.NONE;
+import static org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConstants.EFO_CONSUMER_ARN_PREFIX;
+import static org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConstants.EFO_REGISTRATION_TYPE;
+import static org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConstants.RECORD_PUBLISHER_TYPE;
+import static org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConstants.RecordPublisherType.EFO;
 
 /**
  * General test utils.
@@ -93,4 +109,52 @@ public class TestUtils {
 		return recordBatch;
 	}
 
+	public static StreamShardHandle createDummyStreamShardHandle() {
+		return createDummyStreamShardHandle("stream-name", "000000");
+	}
+
+	public static StreamShardHandle createDummyStreamShardHandle(final String streamName, final String shardId) {
+		final Shard shard = new Shard()
+			.withSequenceNumberRange(new SequenceNumberRange()
+				.withStartingSequenceNumber("0")
+				.withEndingSequenceNumber("9999999999999"))
+			.withHashKeyRange(new HashKeyRange()
+				.withStartingHashKey("0")
+				.withEndingHashKey(new BigInteger(StringUtils.repeat("FF", 16), 16).toString()))
+			.withShardId(shardId);
+
+		return new StreamShardHandle(streamName, shard);
+	}
+
+	public static Properties efoProperties() {
+		Properties consumerConfig = new Properties();
+		consumerConfig.setProperty(RECORD_PUBLISHER_TYPE, EFO.name());
+		consumerConfig.setProperty(EFO_REGISTRATION_TYPE, NONE.name());
+		consumerConfig.setProperty(EFO_CONSUMER_ARN_PREFIX + "." + "fakeStream", "stream-consumer-arn");
+		return consumerConfig;
+	}
+
+	/**
+	 * A test record consumer used to capture messages from kinesis.
+	 */
+	public static class TestConsumer implements RecordPublisher.RecordBatchConsumer {
+		private final List<RecordBatch> recordBatches = new ArrayList<>();
+		private String latestSequenceNumber;
+
+		@Override
+		public SequenceNumber accept(final RecordBatch batch) {
+			recordBatches.add(batch);
+
+			if (batch.getDeaggregatedRecordSize() > 0) {
+				List<UserRecord> records = batch.getDeaggregatedRecords();
+				latestSequenceNumber = records.get(records.size() - 1).getSequenceNumber();
+			}
+
+			return new SequenceNumber(latestSequenceNumber);
+		}
+
+		public List<RecordBatch> getRecordBatches() {
+			return recordBatches;
+		}
+	}
 }

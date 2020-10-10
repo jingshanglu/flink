@@ -24,7 +24,7 @@ import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.table.api._
 import org.apache.flink.table.api.bridge.scala._
 import org.apache.flink.table.api.internal.TableEnvironmentInternal
-import org.apache.flink.table.planner.runtime.utils.{TableEnvUtil, TestData, TestingAppendSink, TestingUpsertTableSink}
+import org.apache.flink.table.planner.runtime.utils.{TestData, TestingAppendSink, TestingUpsertTableSink}
 import org.apache.flink.table.planner.utils.{MemoryTableSourceSinkUtil, TableTestBase, TableTestUtil}
 import org.apache.flink.types.Row
 
@@ -50,7 +50,6 @@ class LegacyTableSinkValidationTest extends TableTestBase {
   @Test(expected = classOf[TableException])
   def testUpsertSinkOnUpdatingTableWithoutFullKey(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     val tEnv = StreamTableEnvironment.create(env, TableTestUtil.STREAM_SETTING)
 
     val t = env.fromCollection(TestData.tupleData3)
@@ -111,7 +110,7 @@ class LegacyTableSinkValidationTest extends TableTestBase {
     MemoryTableSourceSinkUtil.createDataTypeOutputFormatTable(
       tEnv, sinkSchema, "testSink")
     // must fail because query result table schema is different with sink table schema
-    TableEnvUtil.execInsertTableAndWaitResult(resultTable, "testSink")
+    resultTable.executeInsert("testSink").await()
   }
 
 }

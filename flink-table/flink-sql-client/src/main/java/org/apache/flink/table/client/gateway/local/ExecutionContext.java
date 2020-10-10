@@ -550,7 +550,9 @@ public class ExecutionContext<ClusterID> {
 				Time.milliseconds(execution.getMinStateRetention()),
 				Time.milliseconds(execution.getMaxStateRetention()));
 
-		conf.set(CoreOptions.DEFAULT_PARALLELISM, execution.getParallelism());
+		if (execution.getParallelism().isPresent()) {
+			conf.set(CoreOptions.DEFAULT_PARALLELISM, execution.getParallelism().get());
+		}
 		conf.set(PipelineOptions.MAX_PARALLELISM, execution.getMaxParallelism());
 		conf.set(StreamPipelineOptions.TIME_CHARACTERISTIC, execution.getTimeCharacteristic());
 		if (execution.getTimeCharacteristic() == TimeCharacteristic.EventTime) {
@@ -691,7 +693,7 @@ public class ExecutionContext<ClusterID> {
 		final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 		// for TimeCharacteristic validation in StreamTableEnvironmentImpl
 		env.setStreamTimeCharacteristic(environment.getExecution().getTimeCharacteristic());
-		if (env.getStreamTimeCharacteristic() == TimeCharacteristic.EventTime) {
+		if (environment.getExecution().getTimeCharacteristic() == TimeCharacteristic.EventTime) {
 			env.getConfig().setAutoWatermarkInterval(environment.getExecution().getPeriodicWatermarksInterval());
 		}
 		return env;

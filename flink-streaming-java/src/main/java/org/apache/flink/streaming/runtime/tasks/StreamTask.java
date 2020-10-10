@@ -29,8 +29,8 @@ import org.apache.flink.runtime.checkpoint.CheckpointFailureReason;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.channel.ChannelStateReader;
 import org.apache.flink.runtime.checkpoint.channel.ChannelStateWriter;
+import org.apache.flink.runtime.checkpoint.channel.SequentialChannelStateReader;
 import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.execution.CancelTaskException;
 import org.apache.flink.runtime.execution.Environment;
@@ -42,6 +42,7 @@ import org.apache.flink.runtime.io.network.api.writer.RecordWriterBuilder;
 import org.apache.flink.runtime.io.network.api.writer.RecordWriterDelegate;
 import org.apache.flink.runtime.io.network.api.writer.ResultPartitionWriter;
 import org.apache.flink.runtime.io.network.api.writer.SingleRecordWriter;
+import org.apache.flink.runtime.io.network.partition.ChannelStateHolder;
 import org.apache.flink.runtime.io.network.partition.consumer.InputGate;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
@@ -74,6 +75,7 @@ import org.apache.flink.streaming.runtime.tasks.mailbox.TaskMailbox;
 import org.apache.flink.streaming.runtime.tasks.mailbox.TaskMailboxImpl;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.function.RunnableWithException;
@@ -87,7 +89,6 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -165,8 +166,8 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	@Nullable
 	protected StreamInputProcessor inputProcessor;
 
-	/** the head operator that consumes the input streams of this task. */
-	protected OP headOperator;
+	/** the main operator that consumes the input streams of this task. */
+	protected OP mainOperator;
 
 	/** The chain of operators executed by this task. */
 	protected OperatorChain<OUT, OP> operatorChain;
@@ -312,6 +313,21 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 		}
 
 		this.channelIOExecutor = Executors.newSingleThreadExecutor(new ExecutorThreadFactory("channel-state-unspilling"));
+
+		injectChannelStateWriterIntoChannels();
+	}
+
+	private void injectChannelStateWriterIntoChannels() {
+		final Environment env = getEnvironment();
+		final ChannelStateWriter channelStateWriter = subtaskCheckpointCoordinator.getChannelStateWriter();
+		for (final InputGate gate : env.getAllInputGates()) {
+			gate.setChannelStateWriter(channelStateWriter);
+		}
+		for (ResultPartitionWriter writer : env.getAllWriters()) {
+			if (writer instanceof ChannelStateHolder) {
+				((ChannelStateHolder) writer).setChannelStateWriter(channelStateWriter);
+			}
+		}
 	}
 
 	private CompletableFuture<Void> prepareInputSnapshot(ChannelStateWriter channelStateWriter, long checkpointId) throws IOException {
@@ -457,7 +473,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 		LOG.debug("Initializing {}.", getName());
 
 		operatorChain = new OperatorChain<>(this, recordWriter);
-		headOperator = operatorChain.getHeadOperator();
+		mainOperator = operatorChain.getMainOperator();
 
 		// task specific initialization
 		init();
@@ -485,40 +501,19 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	}
 
 	private void readRecoveredChannelState() throws IOException, InterruptedException {
-		ChannelStateReader reader = getEnvironment().getTaskStateManager().getChannelStateReader();
-		if (!reader.hasChannelStates()) {
-			requestPartitions();
-			return;
-		}
-
-		ResultPartitionWriter[] writers = getEnvironment().getAllWriters();
-		if (writers != null) {
-			for (ResultPartitionWriter writer : writers) {
-				writer.readRecoveredState(reader);
+		SequentialChannelStateReader reader = getEnvironment().getTaskStateManager().getSequentialChannelStateReader();
+		reader.readOutputData(getEnvironment().getAllWriters());
+		channelIOExecutor.execute(() -> {
+			try {
+				reader.readInputData(getEnvironment().getAllInputGates());
+			} catch (Exception e) {
+				asyncExceptionHandler.handleAsyncException("Unable to read channel state", e);
 			}
-		}
-
-		// It would get possible benefits to recovery input side after output side, which guarantees the
-		// output can request more floating buffers from global firstly.
-		InputGate[] inputGates = getEnvironment().getAllInputGates();
-		if (inputGates != null && inputGates.length > 0) {
-			CompletableFuture[] futures = new CompletableFuture[inputGates.length];
-			for (int i = 0; i < inputGates.length; i++) {
-				futures[i] = inputGates[i].readRecoveredState(channelIOExecutor, reader);
-			}
-
-			// Note that we must request partition after all the single gates finished recovery.
-			CompletableFuture.allOf(futures).thenRun(() -> mainMailboxExecutor.execute(
-				this::requestPartitions, "Input gates request partitions"));
-		}
-	}
-
-	private void requestPartitions() throws IOException {
-		InputGate[] inputGates = getEnvironment().getAllInputGates();
-		if (inputGates != null) {
-			for (InputGate inputGate : inputGates) {
-				inputGate.requestPartitions();
-			}
+		});
+		for (InputGate inputGate : getEnvironment().getAllInputGates()) {
+			inputGate
+				.getStateConsumedFuture()
+				.thenRun(() -> mainMailboxExecutor.execute(inputGate::requestPartitions, "Input gate request partitions"));
 		}
 	}
 
@@ -563,7 +558,12 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 		return mailboxProcessor.runMailboxStep();
 	}
 
-	private void runMailboxLoop() throws Exception {
+	@VisibleForTesting
+	public boolean isMailboxLoopRunning() {
+		return mailboxProcessor.isMailboxLoopRunning();
+	}
+
+	public void runMailboxLoop() throws Exception {
 		mailboxProcessor.runMailboxLoop();
 	}
 
@@ -863,18 +863,6 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	}
 
 	@Override
-	public <E extends Exception> void executeInTaskThread(
-			ThrowingRunnable<E> runnable,
-			String descriptionFormat,
-			Object... descriptionArgs) throws E {
-		if (mailboxProcessor.isMailboxThread()) {
-			runnable.run();
-		} else {
-			mainMailboxExecutor.execute(runnable, descriptionFormat, descriptionArgs);
-		}
-	}
-
-	@Override
 	public void triggerCheckpointOnBarrier(
 			CheckpointMetaData checkpointMetaData,
 			CheckpointOptions checkpointOptions,
@@ -1018,13 +1006,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	public void dispatchOperatorEvent(OperatorID operator, SerializedValue<OperatorEvent> event) throws FlinkException {
 		try {
 			mainMailboxExecutor.execute(
-				() -> {
-					try {
-						operatorChain.dispatchOperatorEvent(operator, event);
-					} catch (Throwable t) {
-						mailboxProcessor.reportThrowable(t);
-					}
-				},
+				() -> operatorChain.dispatchOperatorEvent(operator, event),
 				"dispatch operator event");
 		}
 		catch (RejectedExecutionException e) {
@@ -1055,8 +1037,8 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	}
 
 	@VisibleForTesting
-	OP getHeadOperator() {
-		return this.headOperator;
+	OP getMainOperator() {
+		return this.mainOperator;
 	}
 
 	@VisibleForTesting
@@ -1143,8 +1125,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 			StreamConfig configuration,
 			Environment environment) {
 		List<RecordWriter<SerializationDelegate<StreamRecord<OUT>>>> recordWriters = new ArrayList<>();
-		List<StreamEdge> outEdgesInOrder = configuration.getOutEdgesInOrder(environment.getUserClassLoader());
-		Map<Integer, StreamConfig> chainedConfigs = configuration.getTransitiveChainedTaskConfigsWithSelf(environment.getUserClassLoader());
+		List<StreamEdge> outEdgesInOrder = configuration.getOutEdgesInOrder(environment.getUserCodeClassLoader().asClassLoader());
 
 		for (int i = 0; i < outEdgesInOrder.size(); i++) {
 			StreamEdge edge = outEdgesInOrder.get(i);
@@ -1154,19 +1135,30 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 					i,
 					environment,
 					environment.getTaskInfo().getTaskName(),
-					chainedConfigs.get(edge.getSourceId()).getBufferTimeout()));
+					edge.getBufferTimeout()));
 		}
 		return recordWriters;
 	}
 
+	@SuppressWarnings("unchecked")
 	private static <OUT> RecordWriter<SerializationDelegate<StreamRecord<OUT>>> createRecordWriter(
 			StreamEdge edge,
 			int outputIndex,
 			Environment environment,
 			String taskName,
 			long bufferTimeout) {
-		@SuppressWarnings("unchecked")
-		StreamPartitioner<OUT> outputPartitioner = (StreamPartitioner<OUT>) edge.getPartitioner();
+
+		StreamPartitioner<OUT> outputPartitioner = null;
+
+		// Clones the partition to avoid multiple stream edges sharing the same stream partitioner,
+		// like the case of https://issues.apache.org/jira/browse/FLINK-14087.
+		try {
+			outputPartitioner = InstantiationUtil.clone(
+				(StreamPartitioner<OUT>) edge.getPartitioner(),
+				environment.getUserCodeClassLoader().asClassLoader());
+		} catch (Exception e) {
+			ExceptionUtils.rethrow(e);
+		}
 
 		LOG.debug("Using partitioner {} for output {} of task {}", outputPartitioner, outputIndex, taskName);
 

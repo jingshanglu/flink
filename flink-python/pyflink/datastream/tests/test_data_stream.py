@@ -16,6 +16,8 @@
 # limitations under the License.
 ################################################################################
 import decimal
+import os
+import uuid
 
 from pyflink.common.typeinfo import Types
 from pyflink.datastream import StreamExecutionEnvironment
@@ -26,6 +28,7 @@ from pyflink.datastream.functions import MapFunction, FlatMapFunction
 from pyflink.datastream.functions import CoMapFunction, CoFlatMapFunction
 from pyflink.datastream.tests.test_util import DataStreamTestSinkFunction
 from pyflink.java_gateway import get_gateway
+from pyflink.common import Row
 from pyflink.testing.test_case_utils import PyFlinkTestCase
 
 
@@ -66,7 +69,9 @@ class DataStreamTests(PyFlinkTestCase):
     def test_reduce_function_without_data_types(self):
         ds = self.env.from_collection([(1, 'a'), (2, 'a'), (3, 'a'), (4, 'b')],
                                       type_info=Types.ROW([Types.INT(), Types.STRING()]))
-        ds.key_by(lambda a: a[1]).reduce(lambda a, b: (a[0] + b[0], b[1])).add_sink(self.test_sink)
+        ds.key_by(lambda a: a[1]) \
+          .reduce(lambda a, b: Row(a[0] + b[0], b[1])) \
+          .add_sink(self.test_sink)
         self.env.execute('reduce_function_test')
         result = self.test_sink.get_results()
         expected = ["1,a", "3,a", "6,a", "4,b"]
@@ -84,8 +89,8 @@ class DataStreamTests(PyFlinkTestCase):
         ds.map(MyMapFunction()).add_sink(self.test_sink)
         self.env.execute('map_function_test')
         results = self.test_sink.get_results(True)
-        expected = ["('ab', 2, Decimal('1'))", "('bdc', 3, Decimal('2'))",
-                    "('cfgs', 4, Decimal('3'))", "('deeefg', 6, Decimal('4'))"]
+        expected = ["<Row('ab', 2, Decimal('1'))>", "<Row('bdc', 3, Decimal('2'))>",
+                    "<Row('cfgs', 4, Decimal('3'))>", "<Row('deeefg', 6, Decimal('4'))>"]
         expected.sort()
         results.sort()
         self.assertEqual(expected, results)
@@ -95,10 +100,10 @@ class DataStreamTests(PyFlinkTestCase):
                                       type_info=Types.TUPLE([Types.STRING(), Types.INT()]))
 
         def map_func(value):
-            result = (value[0], len(value[0]), value[1])
+            result = Row(value[0], len(value[0]), value[1])
             return result
 
-        ds.map(map_func, type_info=Types.ROW([Types.STRING(), Types.INT(), Types.INT()]))\
+        ds.map(map_func, output_type=Types.ROW([Types.STRING(), Types.INT(), Types.INT()]))\
             .add_sink(self.test_sink)
         self.env.execute('map_function_test')
         results = self.test_sink.get_results(False)
@@ -120,6 +125,33 @@ class DataStreamTests(PyFlinkTestCase):
         expected.sort()
         results.sort()
         self.assertEqual(expected, results)
+
+    def test_connected_streams_with_dependency(self):
+        python_file_dir = os.path.join(self.tempdir, "python_file_dir_" + str(uuid.uuid4()))
+        os.mkdir(python_file_dir)
+        python_file_path = os.path.join(python_file_dir, "test_stream_dependency_manage_lib.py")
+        with open(python_file_path, 'w') as f:
+            f.write("def add_two(a):\n    return a + 2")
+
+        class TestCoMapFunction(CoMapFunction):
+
+            def map1(self, value):
+                from test_stream_dependency_manage_lib import add_two
+                return add_two(value)
+
+            def map2(self, value):
+                return value + 1
+
+        self.env.add_python_file(python_file_path)
+        ds = self.env.from_collection([1, 2, 3, 4, 5])
+        ds_1 = ds.map(lambda x: x * 2)
+        ds.connect(ds_1).map(TestCoMapFunction()).add_sink(self.test_sink)
+        self.env.execute("test co-map add python file")
+        result = self.test_sink.get_results(True)
+        expected = ['11', '3', '3', '4', '5', '5', '6', '7', '7', '9']
+        result.sort()
+        expected.sort()
+        self.assertEqual(expected, result)
 
     def test_co_map_function_with_data_types(self):
         self.env.set_parallelism(1)
@@ -181,7 +213,7 @@ class DataStreamTests(PyFlinkTestCase):
         ds = self.env.from_collection([('ab', 1), ('bdc', 2), ('cfgs', 3), ('deeefg', 4)],
                                       type_info=Types.ROW([Types.STRING(), Types.INT()]))
 
-        ds.map(MyMapFunction(), type_info=Types.ROW([Types.STRING(), Types.INT(), Types.INT()]))\
+        ds.map(MyMapFunction(), output_type=Types.ROW([Types.STRING(), Types.INT(), Types.INT()]))\
             .add_sink(self.test_sink)
         self.env.execute('map_function_test')
         results = self.test_sink.get_results(False)
@@ -193,7 +225,7 @@ class DataStreamTests(PyFlinkTestCase):
     def test_flat_map_function(self):
         ds = self.env.from_collection([('a', 0), ('ab', 1), ('bdc', 2), ('cfgs', 3), ('deeefg', 4)],
                                       type_info=Types.ROW([Types.STRING(), Types.INT()]))
-        ds.flat_map(MyFlatMapFunction(), type_info=Types.ROW([Types.STRING(), Types.INT()]))\
+        ds.flat_map(MyFlatMapFunction(), result_type=Types.ROW([Types.STRING(), Types.INT()]))\
             .add_sink(self.test_sink)
 
         self.env.execute('flat_map_test')
@@ -212,7 +244,7 @@ class DataStreamTests(PyFlinkTestCase):
             if value[1] % 2 == 0:
                 yield value
 
-        ds.flat_map(flat_map, type_info=Types.ROW([Types.STRING(), Types.INT()]))\
+        ds.flat_map(flat_map, result_type=Types.ROW([Types.STRING(), Types.INT()]))\
             .add_sink(self.test_sink)
         self.env.execute('flat_map_test')
         results = self.test_sink.get_results(False)
@@ -416,8 +448,8 @@ class DataStreamTests(PyFlinkTestCase):
             assert expected_num_partitions, num_partitions
             return key % num_partitions
 
-        partitioned_stream = ds.map(lambda x: x, type_info=Types.ROW([Types.STRING(),
-                                                                      Types.INT()]))\
+        partitioned_stream = ds.map(lambda x: x, output_type=Types.ROW([Types.STRING(),
+                                                                        Types.INT()]))\
             .set_parallelism(4).partition_custom(my_partitioner, lambda x: x[1])
 
         JPartitionCustomTestMapFunction = get_gateway().jvm\
@@ -528,6 +560,43 @@ class DataStreamTests(PyFlinkTestCase):
         # upstream and downstream operators.
         assert_chainable(j_generated_stream_graph, False, False)
 
+    def test_primitive_array_type_info(self):
+        ds = self.env.from_collection([(1, [1.1, 1.2, 1.30]), (2, [2.1, 2.2, 2.3]),
+                                      (3, [3.1, 3.2, 3.3])],
+                                      type_info=Types.ROW([Types.INT(),
+                                                           Types.PRIMITIVE_ARRAY(Types.FLOAT())]))
+
+        ds.map(lambda x: x, output_type=Types.ROW([Types.INT(),
+                                                   Types.PRIMITIVE_ARRAY(Types.FLOAT())]))\
+            .add_sink(self.test_sink)
+        self.env.execute("test primitive array type info")
+        results = self.test_sink.get_results()
+        expected = ['1,[1.1, 1.2, 1.3]', '2,[2.1, 2.2, 2.3]', '3,[3.1, 3.2, 3.3]']
+        results.sort()
+        expected.sort()
+        self.assertEqual(expected, results)
+
+    def test_basic_array_type_info(self):
+        ds = self.env.from_collection([(1, [1.1, None, 1.30], [None, 'hi', 'flink']),
+                                       (2, [None, 2.2, 2.3], ['hello', None, 'flink']),
+                                      (3, [3.1, 3.2, None], ['hello', 'hi', None])],
+                                      type_info=Types.ROW([Types.INT(),
+                                                           Types.BASIC_ARRAY(Types.FLOAT()),
+                                                           Types.BASIC_ARRAY(Types.STRING())]))
+
+        ds.map(lambda x: x, output_type=Types.ROW([Types.INT(),
+                                                   Types.BASIC_ARRAY(Types.FLOAT()),
+                                                   Types.BASIC_ARRAY(Types.STRING())]))\
+            .add_sink(self.test_sink)
+        self.env.execute("test basic array type info")
+        results = self.test_sink.get_results()
+        expected = ['1,[1.1, null, 1.3],[null, hi, flink]',
+                    '2,[null, 2.2, 2.3],[hello, null, flink]',
+                    '3,[3.1, 3.2, null],[hello, hi, null]']
+        results.sort()
+        expected.sort()
+        self.assertEqual(expected, results)
+
     def tearDown(self) -> None:
         self.test_sink.clear()
 
@@ -535,7 +604,7 @@ class DataStreamTests(PyFlinkTestCase):
 class MyMapFunction(MapFunction):
 
     def map(self, value):
-        result = (value[0], len(value[0]), value[1])
+        result = Row(value[0], len(value[0]), value[1])
         return result
 
 

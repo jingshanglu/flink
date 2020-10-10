@@ -84,6 +84,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
@@ -140,6 +141,8 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 
 	private final ResourceManagerMetricGroup resourceManagerMetricGroup;
 
+	protected final Executor ioExecutor;
+
 	/** The service to elect a ResourceManager leader. */
 	private LeaderElectionService leaderElectionService;
 
@@ -168,7 +171,8 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 			ClusterInformation clusterInformation,
 			FatalErrorHandler fatalErrorHandler,
 			ResourceManagerMetricGroup resourceManagerMetricGroup,
-			Time rpcTimeout) {
+			Time rpcTimeout,
+			Executor ioExecutor) {
 
 		super(rpcService, AkkaRpcServiceUtils.createRandomName(RESOURCE_MANAGER_NAME), null);
 
@@ -197,6 +201,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 					throw new CompletionException(throwable);
 				})
 		);
+		this.ioExecutor = ioExecutor;
 	}
 
 
@@ -376,7 +381,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 					return registrationResponse;
 				}
 			},
-			getRpcService().getExecutor());
+			ioExecutor);
 	}
 
 	@Override
@@ -546,12 +551,14 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 					resourceId,
 					taskExecutor.getTaskExecutorGateway().getAddress(),
 					taskExecutor.getDataPort(),
+					taskExecutor.getJmxPort(),
 					taskManagerHeartbeatManager.getLastHeartbeatFrom(resourceId),
 					slotManager.getNumberRegisteredSlotsOf(taskExecutor.getInstanceID()),
 					slotManager.getNumberFreeSlotsOf(taskExecutor.getInstanceID()),
 					slotManager.getRegisteredResourceOf(taskExecutor.getInstanceID()),
 					slotManager.getFreeResourceOf(taskExecutor.getInstanceID()),
-					taskExecutor.getHardwareDescription()));
+					taskExecutor.getHardwareDescription(),
+					taskExecutor.getMemoryConfiguration()));
 		}
 
 		return CompletableFuture.completedFuture(taskManagerInfos);
@@ -570,12 +577,14 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 				resourceId,
 				taskExecutor.getTaskExecutorGateway().getAddress(),
 				taskExecutor.getDataPort(),
+				taskExecutor.getJmxPort(),
 				taskManagerHeartbeatManager.getLastHeartbeatFrom(resourceId),
 				slotManager.getNumberRegisteredSlotsOf(instanceId),
 				slotManager.getNumberFreeSlotsOf(instanceId),
 				slotManager.getRegisteredResourceOf(instanceId),
 				slotManager.getFreeResourceOf(instanceId),
-				taskExecutor.getHardwareDescription());
+				taskExecutor.getHardwareDescription(),
+				taskExecutor.getMemoryConfiguration());
 
 			return CompletableFuture.completedFuture(taskManagerInfo);
 		}
@@ -782,7 +791,9 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 				taskExecutorGateway,
 				newWorker,
 				taskExecutorRegistration.getDataPort(),
-				taskExecutorRegistration.getHardwareDescription());
+				taskExecutorRegistration.getJmxPort(),
+				taskExecutorRegistration.getHardwareDescription(),
+				taskExecutorRegistration.getMemoryConfiguration());
 
 			log.info("Registering TaskManager with ResourceID {} ({}) at ResourceManager", taskExecutorResourceId.getStringWithMetadata(), taskExecutorAddress);
 			taskExecutors.put(taskExecutorResourceId, registration);
@@ -973,7 +984,7 @@ public abstract class ResourceManager<WorkerType extends ResourceIDRetrievable>
 					leaderElectionService.confirmLeadership(newLeaderSessionID, getAddress());
 				}
 			},
-			getRpcService().getExecutor());
+			ioExecutor);
 
 		confirmationFuture.whenComplete(
 			(Void ignored, Throwable throwable) -> {
